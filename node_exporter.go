@@ -18,7 +18,9 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"sort"
+	"strings"
 
+	httpAuth "github.com/abbot/go-http-auth"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/log"
@@ -146,6 +148,10 @@ func main() {
 			"web.max-requests",
 			"Maximum number of parallel scrape requests. Use 0 to disable.",
 		).Default("40").Int()
+		htpasswd = kingpin.Flag(
+			"web.htpasswd",
+			"The htpasswd file path. Use \"\" to disable.",
+		).Default("").String()
 	)
 
 	log.AddFlags(kingpin.CommandLine)
@@ -156,8 +162,8 @@ func main() {
 	log.Infoln("Starting node_exporter", version.Info())
 	log.Infoln("Build context", version.BuildContext())
 
-	http.Handle(*metricsPath, newHandler(!*disableExporterMetrics, *maxRequests))
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	metricsPathHandler := newHandler(!*disableExporterMetrics, *maxRequests)
+	rootHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 			<head><title>Node Exporter</title></head>
 			<body>
@@ -165,7 +171,16 @@ func main() {
 			<p><a href="` + *metricsPath + `">Metrics</a></p>
 			</body>
 			</html>`))
-	})
+	}
+
+	if strings.TrimSpace(*htpasswd) == "" {
+		http.Handle(*metricsPath, metricsPathHandler)
+		http.HandleFunc("/", rootHandler)
+	} else {
+		authenticator := httpAuth.NewBasicAuthenticator("node_exporter.ddder.com", httpAuth.HtpasswdFileProvider(*htpasswd))
+		http.Handle(*metricsPath, httpAuth.JustCheck(authenticator, metricsPathHandler.ServeHTTP))
+		http.HandleFunc("/", httpAuth.JustCheck(authenticator, rootHandler))
+	}
 
 	log.Infoln("Listening on", *listenAddress)
 	if err := http.ListenAndServe(*listenAddress, nil); err != nil {
